@@ -1,12 +1,29 @@
 import { NextResponse } from "next/server";
-import { checkAdminPassword, signToken, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from "@/lib/auth";
+import {
+  checkAdminPassword,
+  getAdminApiKey,
+  getAdminPassword,
+  signToken,
+  SESSION_COOKIE_NAME,
+  SESSION_MAX_AGE_SECONDS,
+} from "@/lib/auth";
 
 export async function POST(request) {
   try {
-    const body = await request.json().catch(() => null);
-    const password = body?.password;
+    if (!getAdminPassword() && !getAdminApiKey()) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Server configuration error: ADMIN_PASSWORD / ADMIN_API_KEY is not configured in .env.local.",
+        },
+        { status: 500 }
+      );
+    }
 
-    if (!password || typeof password !== "string") {
+    const body = await request.json().catch(() => null);
+    const password = typeof body?.password === "string" ? body.password.trim() : "";
+
+    if (!password) {
       return NextResponse.json({ success: false, error: "Password is required" }, { status: 400 });
     }
 
@@ -16,6 +33,9 @@ export async function POST(request) {
 
     const timestamp = Math.floor(Date.now() / 1000);
     const token = signToken(timestamp);
+    const isHttps =
+      request.headers.get("x-forwarded-proto") === "https" ||
+      (typeof request.url === "string" && request.url.startsWith("https://"));
 
     const response = NextResponse.json({
       success: true,
@@ -26,7 +46,7 @@ export async function POST(request) {
       name: SESSION_COOKIE_NAME,
       value: token,
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: isHttps,
       sameSite: "strict",
       path: "/",
       maxAge: SESSION_MAX_AGE_SECONDS,

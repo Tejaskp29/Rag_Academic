@@ -55,15 +55,24 @@ export function verifyToken(token, secret = null) {
   return payload;
 }
 
+function timingSafeStringMatch(provided, expected) {
+  if (!provided || !expected) return false;
+  const bufProvided = Buffer.from(provided);
+  const bufExpected = Buffer.from(expected);
+  if (bufProvided.length !== bufExpected.length) return false;
+  return crypto.timingSafeEqual(bufProvided, bufExpected);
+}
+
 export function checkAdminPassword(providedPassword) {
   if (!providedPassword || typeof providedPassword !== "string") return false;
-  const target = getAdminPassword();
-  if (!target) return false;
+  const configuredPassword = process.env.ADMIN_PASSWORD || "";
+  const configuredApiKey = process.env.ADMIN_API_KEY || "";
+  if (!configuredPassword && !configuredApiKey) return false;
 
-  const bufProvided = Buffer.from(providedPassword);
-  const bufTarget = Buffer.from(target);
-  if (bufProvided.length !== bufTarget.length) return false;
-  return crypto.timingSafeEqual(bufProvided, bufTarget);
+  return (
+    timingSafeStringMatch(providedPassword, configuredPassword) ||
+    timingSafeStringMatch(providedPassword, configuredApiKey)
+  );
 }
 
 export function verifyAdminRequest(request) {

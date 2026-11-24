@@ -8,6 +8,20 @@ echo.
 set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
+if not exist "%SCRIPT_DIR%rag_ingestion\.env" (
+    if exist "%SCRIPT_DIR%rag_ingestion\.env.example" (
+        echo Creating rag_ingestion\.env from .env.example...
+        copy "%SCRIPT_DIR%rag_ingestion\.env.example" "%SCRIPT_DIR%rag_ingestion\.env" >nul
+    )
+)
+
+if not exist "%SCRIPT_DIR%rag_proj\.env.local" (
+    if exist "%SCRIPT_DIR%rag_proj\.env.example" (
+        echo Creating rag_proj\.env.local from .env.example...
+        copy "%SCRIPT_DIR%rag_proj\.env.example" "%SCRIPT_DIR%rag_proj\.env.local" >nul
+    )
+)
+
 echo [1/2] Starting Flask Backend Engine on port 5000...
 start "College RAG - Flask Backend (Port 5000)" cmd /k "cd /d "%SCRIPT_DIR%rag_ingestion" && (if exist venv\Scripts\activate.bat (call venv\Scripts\activate.bat) else (python -m venv venv && call venv\Scripts\activate.bat && pip install -r requirements.txt)) && python server.py"
 
