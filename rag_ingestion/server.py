@@ -3171,6 +3171,15 @@ def ask():
     institution = data_in.get("institution") or None
     stream = data_in.get("stream", False)
 
+    if question and isinstance(question, str) and question.strip():
+        record_question_analytics(
+            question,
+            institution=institution,
+            department=department,
+            year=year,
+            category=category
+        )
+
     if stream:
         return Response(
             stream_with_context(
@@ -3219,6 +3228,15 @@ def ask_stream():
     use_multilingual = data_in.get("use_multilingual")
     conversation_history = data_in.get("conversation_history") or None
     institution = data_in.get("institution") or None
+
+    if question and isinstance(question, str) and question.strip():
+        record_question_analytics(
+            question,
+            institution=institution,
+            department=department,
+            year=year,
+            category=category
+        )
 
     return Response(
         stream_with_context(
@@ -3581,6 +3599,193 @@ def get_upload_status(job_id):
             "error": job.get("error"),
             "result": job.get("result")
         }), 200
+
+
+# ==============================================================================
+# Question Analytics & Repeated Student Inquiry Tracking
+# ==============================================================================
+
+_ANALYTICS_LOCK = threading.Lock()
+
+
+def get_analytics_filepath():
+    """Returns path to persistent question analytics JSON beside chunks database."""
+    data_dir = os.path.dirname(os.path.abspath(get_data_filepath()))
+    return os.path.join(data_dir, "question_analytics.json")
+
+
+def infer_question_area(question_text, explicit_category=None):
+    """Infers academic topic area when student did not pick an explicit category filter."""
+    if explicit_category and str(explicit_category).strip():
+        return str(explicit_category).strip().lower()
+    q = (question_text or "").lower()
+    if any(k in q for k in ("fee", "tuition", "pgcet", "quota", "payment", "rupees", "inr", "cost")):
+        return "fee"
+    if any(k in q for k in ("timetable", "time table", "schedule", "period", "faculty", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")):
+        return "timetable"
+    if any(k in q for k in ("lab", "experiment", "program", "bst", "python", "code", "html", "css", "manual", "implementation")):
+        return "lab_manual"
+    if any(k in q for k in ("rank", "topper", "merit", "cgpa", "sgpa", "gold medal", "exam", "distinction", "marks", "cie", "see")):
+        return "exam"
+    if any(k in q for k in ("placement", "package", "recruiter", "attendance", "regulation", "eligibility", "campus")):
+        return "placement"
+    if any(k in q for k in ("syllabus", "credit", "scheme", "unit", "module", "course", "subject", "semester", "objective")):
+        return "syllabus"
+    if any(k in q for k in ("admission", "cet", "comedk", "apply")):
+        return "admission"
+    return "general"
+
+
+def record_question_analytics(question, institution=None, department=None, year=None, category=None):
+    """Persists normalized student question frequency and topic/institution metadata."""
+    if not question or not isinstance(question, str):
+        return
+    cleaned = re.sub(r"\s+", " ", question.strip())
+    if len(cleaned) < 3:
+        return
+
+    norm_key = re.sub(r"[^\w\s]", "", cleaned.lower()).strip()
+    norm_key = re.sub(r"\s+", " ", norm_key) or cleaned.lower()
+
+    area = infer_question_area(cleaned, category)
+    inst_val = (str(institution).strip().lower() if institution else "all") or "all"
+    dept_val = (str(department).strip().upper() if department else "ALL") or "ALL"
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    filepath = get_analytics_filepath()
+    with _ANALYTICS_LOCK:
+        store = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        store = loaded
+            except Exception:
+                store = {}
+
+        entry = store.get(norm_key) or {
+            "question": cleaned,
+            "count": 0,
+            "last_asked_at": now_iso,
+            "institutions": {},
+            "departments": {},
+            "areas": {}
+        }
+        entry["question"] = cleaned
+        entry["count"] = int(entry.get("count", 0)) + 1
+        entry["last_asked_at"] = now_iso
+
+        for bucket_name, bucket_val in (("institutions", inst_val), ("departments", dept_val), ("areas", area)):
+            bucket = entry.setdefault(bucket_name, {})
+            bucket[bucket_val] = int(bucket.get(bucket_val, 0)) + 1
+
+        store[norm_key] = entry
+
+        try:
+            tmp_path = filepath + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(store, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, filepath)
+        except Exception as e:
+            print(f"[ANALYTICS] Failed to persist question analytics: {e}")
+
+
+def _top_bucket_key(bucket, default_val):
+    if not isinstance(bucket, dict) or not bucket:
+        return default_val
+    return max(bucket.items(), key=lambda kv: kv[1])[0]
+
+
+@app.route("/admin/analytics/questions", methods=["GET", "DELETE"])
+@require_admin_auth
+def admin_question_analytics():
+    """
+    Admin analytics endpoint returning most repeatedly asked questions and
+    aggregated inquiry areas (fee, syllabus, lab_manual, timetable, exam, etc.).
+    """
+    filepath = get_analytics_filepath()
+    if request.method == "DELETE":
+        with _ANALYTICS_LOCK:
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception as e:
+                    return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": True, "message": "Question analytics history cleared."}), 200
+
+    with _ANALYTICS_LOCK:
+        store = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        store = loaded
+            except Exception:
+                store = {}
+
+    area_totals = Counter()
+    inst_totals = Counter()
+    dept_totals = Counter()
+    items = []
+    total_queries = 0
+    repeated_count = 0
+
+    for norm_key, entry in store.items():
+        cnt = int(entry.get("count", 0))
+        total_queries += cnt
+        if cnt >= 2:
+            repeated_count += 1
+
+        for k, v in (entry.get("areas") or {}).items():
+            area_totals[k] += int(v)
+        for k, v in (entry.get("institutions") or {}).items():
+            inst_totals[k] += int(v)
+        for k, v in (entry.get("departments") or {}).items():
+            dept_totals[k] += int(v)
+
+        items.append({
+            "id": norm_key,
+            "question": entry.get("question", norm_key),
+            "count": cnt,
+            "last_asked_at": entry.get("last_asked_at"),
+            "primary_area": _top_bucket_key(entry.get("areas"), "general"),
+            "primary_institution": _top_bucket_key(entry.get("institutions"), "all"),
+            "primary_department": _top_bucket_key(entry.get("departments"), "ALL"),
+        })
+
+    items.sort(key=lambda x: (x["count"], x.get("last_asked_at") or ""), reverse=True)
+
+    area_breakdown = [
+        {
+            "area": k,
+            "count": v,
+            "percentage": round((v / total_queries) * 100, 1) if total_queries else 0
+        }
+        for k, v in area_totals.most_common()
+    ]
+    institution_breakdown = [
+        {"institution": k, "count": v}
+        for k, v in inst_totals.most_common()
+    ]
+    department_breakdown = [
+        {"department": k, "count": v}
+        for k, v in dept_totals.most_common()
+    ]
+
+    return jsonify({
+        "success": True,
+        "total_queries": total_queries,
+        "unique_questions": len(items),
+        "repeated_questions_count": repeated_count,
+        "top_questions": items[:50],
+        "area_breakdown": area_breakdown,
+        "institution_breakdown": institution_breakdown,
+        "department_breakdown": department_breakdown,
+    }), 200
+
+
 if __name__ == "__main__":
     port_env = os.environ.get("FLASK_PORT")
     host_env = os.environ.get("FLASK_HOST", "127.0.0.1")

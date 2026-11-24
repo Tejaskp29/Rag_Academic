@@ -74,6 +74,13 @@ export default function AskPage() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [exportedMsgId, setExportedMsgId] = useState(null);
+
+  // Voice Query Microphone (Web Speech API)
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceLang, setVoiceLang] = useState("en-IN");
+  const recognitionRef = useRef(null);
 
   // In-flight cancellation controller
   const abortControllerRef = useRef(null);
@@ -95,9 +102,14 @@ export default function AskPage() {
     scrollToBottom();
   }, [messages]);
 
-  // Read URL query parameters on initial mount
+  // Read URL query parameters and detect browser speech recognition support
   useEffect(() => {
     if (typeof window !== "undefined") {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        setVoiceSupported(true);
+      }
+
       const params = new URLSearchParams(window.location.search);
       const initialQuery = params.get("q");
       const initialDept = params.get("department");
@@ -110,6 +122,14 @@ export default function AskPage() {
       if (initialPdf) setSelectedPdfs([initialPdf]);
       if (initialDept || initialCat || initialPdf) setShowFilters(true);
     }
+
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+    };
   }, []);
 
   // Fetch available documents when metadata filters change
@@ -211,6 +231,209 @@ export default function AskPage() {
     });
   }
 
+  function handleToggleVoice() {
+    if (typeof window === "undefined") return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setErrorMsg("Voice input is not supported in this browser. Try Chrome or Edge.");
+      return;
+    }
+
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      setIsListening(false);
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = voiceLang;
+      recognition.interimResults = true;
+      recognition.continuous = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setErrorMsg("");
+      };
+
+      recognition.onresult = (event) => {
+        const transcript = Array.from(event.results)
+          .map((res) => res[0].transcript)
+          .join(" ")
+          .trim();
+        if (transcript) {
+          setQuestion(transcript);
+        }
+      };
+
+      recognition.onerror = (event) => {
+        setIsListening(false);
+        if (event.error === "not-allowed") {
+          setErrorMsg("Microphone permission denied. Please enable microphone access in your browser.");
+        } else if (event.error !== "aborted" && event.error !== "no-speech") {
+          setErrorMsg(`Voice recognition error: ${event.error}`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      setIsListening(false);
+      setErrorMsg(err.message || "Unable to start microphone voice input.");
+    }
+  }
+
+  function buildRevisionNoteMarkdown(msg, userQuestion, groupedSources) {
+    const instLabel = institution
+      ? INSTITUTION_META[institution]?.name || institution.toUpperCase()
+      : "All Institutions";
+    const branchLabel = department || "All Branches";
+    const yearLabel = year || "All Years";
+    const exportedAt = new Date().toLocaleString();
+
+    const citationLines =
+      groupedSources && groupedSources.length > 0
+        ? groupedSources
+            .map((item) => {
+              const pagesStr =
+                item.pages && item.pages.length > 0
+                  ? item.pages.map((p) => `Page ${p}`).join(", ")
+                  : "Page unreferenced";
+              return `- **${item.pdf}** (${pagesStr})`;
+            })
+            .join("\n")
+        : "- No external citations attached";
+
+    return `# 🎓 College RAG — Academic Revision Note
+
+- **Generated:** ${exportedAt}
+- **Institution:** ${instLabel}
+- **Branch / Department:** ${branchLabel}
+- **Academic Year:** ${yearLabel}
+
+---
+
+## ❓ Question
+${userQuestion || "Academic Inquiry"}
+
+---
+
+## 💡 Grounded Academic Answer
+${msg.content || ""}
+
+---
+
+## 📚 Verified Source Citations
+${citationLines}
+`;
+  }
+
+  function handleExportRevisionNote(msg, msgIndex, groupedSources) {
+    const prevMsg = msgIndex > 0 ? messages[msgIndex - 1] : null;
+    const userQuestion = prevMsg && prevMsg.role === "user" ? prevMsg.content : "Academic Inquiry";
+    const md = buildRevisionNoteMarkdown(msg, userQuestion, groupedSources);
+
+    const slug = userQuestion
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 48);
+    const filename = `revision-note-${slug || "academic-summary"}.md`;
+
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setExportedMsgId(msg.id);
+    setTimeout(() => {
+      setExportedMsgId((curr) => (curr === msg.id ? null : curr));
+    }, 2500);
+  }
+
+  function escapeHtml(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function handlePrintRevisionNote(msg, msgIndex, groupedSources) {
+    if (typeof window === "undefined") return;
+    const prevMsg = msgIndex > 0 ? messages[msgIndex - 1] : null;
+    const userQuestion = prevMsg && prevMsg.role === "user" ? prevMsg.content : "Academic Inquiry";
+    const instLabel = institution
+      ? INSTITUTION_META[institution]?.name || institution.toUpperCase()
+      : "All Institutions";
+    const citationsHtml =
+      groupedSources && groupedSources.length > 0
+        ? groupedSources
+            .map((item) => {
+              const pages = item.pages?.length ? item.pages.map((p) => `Page ${p}`).join(", ") : "Page unreferenced";
+              return `<li><strong>${escapeHtml(item.pdf)}</strong> — ${escapeHtml(pages)}</li>`;
+            })
+            .join("")
+        : "<li>No external citations attached</li>";
+
+    const printWin = window.open("", "_blank", "width=850,height=900");
+    if (!printWin) {
+      setErrorMsg("Popup blocked. Please allow popups to print or save as PDF, or use Export Note (.md).");
+      return;
+    }
+
+    printWin.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Revision Note - ${escapeHtml(userQuestion.slice(0, 60))}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #0f172a; max-width: 780px; margin: 36px auto; padding: 0 20px; line-height: 1.6; }
+    .header { border-bottom: 2px solid #0284c7; padding-bottom: 12px; margin-bottom: 20px; }
+    .title { font-size: 20px; font-weight: 700; margin: 0 0 6px 0; color: #0c4a6e; }
+    .meta { font-size: 12px; color: #475569; }
+    .box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 18px; }
+    .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #0369a1; margin-bottom: 6px; }
+    .answer { white-space: pre-wrap; font-size: 14px; }
+    ul { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 class="title">🎓 College RAG — Academic Revision Note</h1>
+    <div class="meta">Institution: ${escapeHtml(instLabel)} &bull; Branch: ${escapeHtml(department || "All Branches")} &bull; Year: ${escapeHtml(year || "All Years")} &bull; Generated: ${escapeHtml(new Date().toLocaleString())}</div>
+  </div>
+  <div class="box">
+    <div class="label">Question</div>
+    <div><strong>${escapeHtml(userQuestion)}</strong></div>
+  </div>
+  <div class="box">
+    <div class="label">Grounded Academic Answer</div>
+    <div class="answer">${escapeHtml(msg.content)}</div>
+  </div>
+  <div class="box">
+    <div class="label">Verified Source Citations</div>
+    <ul>${citationsHtml}</ul>
+  </div>
+  <script>window.onload = function() { window.print(); };</script>
+</body>
+</html>`);
+    printWin.document.close();
+  }
+
   // Hierarchical group of available documents by branch and category for the checklist
   const docsByBranchAndCategory = useMemo(() => {
     const grouped = {};
@@ -233,6 +456,13 @@ export default function AskPage() {
     e.preventDefault();
     const trimmed = question.trim();
     if (!trimmed || loading) return;
+
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      setIsListening(false);
+    }
 
     // Automatically collapse filters and document dropdown on ask to ensure answer visibility
     setShowFilters(false);
@@ -1184,7 +1414,7 @@ export default function AskPage() {
               </div>
             </div>
           ) : (
-            messages.map((msg) => {
+            messages.map((msg, msgIndex) => {
               const isUser = msg.role === "user";
 
               if (isUser) {
@@ -1206,16 +1436,46 @@ export default function AskPage() {
                   </div>
 
                   <div className="flex-1 space-y-3 max-w-full overflow-hidden">
-                    {/* Performance Metrics Header */}
-                    <div className="flex items-center gap-2 text-[11px] text-slate-500 border-b border-slate-200 pb-1.5">
-                      <span className="font-semibold text-slate-700">💡 Grounded Academic Response</span>
-                      {msg.ttftMs && <span>&bull; TTFT: {msg.ttftMs}ms</span>}
-                      {msg.totalTimeSec && <span>&bull; Total: {msg.totalTimeSec}s</span>}
-                      {msg.isStreaming && (
-                        <span className="text-sky-600 font-medium animate-pulse ml-auto flex items-center gap-1">
+                    {/* Performance Metrics & Export Revision Note Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 border-b border-slate-200 pb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-slate-700">💡 Grounded Academic Response</span>
+                        {msg.ttftMs && <span>&bull; TTFT: {msg.ttftMs}ms</span>}
+                        {msg.totalTimeSec && <span>&bull; Total: {msg.totalTimeSec}s</span>}
+                      </div>
+
+                      {msg.isStreaming ? (
+                        <span className="text-sky-600 font-medium animate-pulse flex items-center gap-1">
                           <span className="w-1.5 h-1.5 rounded-full bg-sky-600 animate-ping"></span>
                           Generating...
                         </span>
+                      ) : (
+                        msg.content && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleExportRevisionNote(msg, msgIndex, groupedSources)}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition cursor-pointer ${
+                                exportedMsgId === msg.id
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                                  : "bg-white text-slate-700 border-slate-200 hover:bg-sky-50 hover:text-sky-700 hover:border-sky-300"
+                              }`}
+                              title="Download as Markdown Revision Note with Citations"
+                            >
+                              <span>{exportedMsgId === msg.id ? "✓" : "📥"}</span>
+                              <span>{exportedMsgId === msg.id ? "Exported!" : "Export Note"}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handlePrintRevisionNote(msg, msgIndex, groupedSources)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 hover:text-slate-900 text-[11px] font-semibold transition cursor-pointer"
+                              title="Print or Save Revision Note as PDF"
+                            >
+                              <span>🖨️</span>
+                              <span className="hidden sm:inline">Save PDF</span>
+                            </button>
+                          </div>
+                        )
                       )}
                     </div>
 
@@ -1347,18 +1607,57 @@ export default function AskPage() {
             )}
 
             <form onSubmit={handleAsk} className="flex items-center gap-2">
-              <input
-                type="text"
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                disabled={loading}
-                placeholder={
-                  department
-                    ? `Ask questions within ${department} branch (${category || "all categories"})...`
-                    : "Ask about courses, syllabi, fee structures, or lab manuals..."
-                }
-                className="flex-1 px-4 py-3 rounded-xl border border-slate-300 bg-white text-slate-900 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-sky-500 focus:border-sky-500 shadow-2xs"
-              />
+              <div className="relative flex-1 flex items-center">
+                <input
+                  type="text"
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  disabled={loading}
+                  placeholder={
+                    isListening
+                      ? "Listening... speak your academic question now"
+                      : department
+                      ? `Ask questions within ${department} branch (${category || "all categories"})...`
+                      : "Ask about courses, syllabi, fee structures, or lab manuals..."
+                  }
+                  className={`w-full pl-4 pr-24 py-3 rounded-xl border bg-white text-slate-900 text-sm sm:text-base focus:outline-none focus:ring-2 shadow-2xs transition ${
+                    isListening
+                      ? "border-rose-400 ring-2 ring-rose-200 focus:ring-rose-400 focus:border-rose-500"
+                      : "border-slate-300 focus:ring-sky-500 focus:border-sky-500"
+                  }`}
+                />
+
+                {/* Voice Query Microphone Controls */}
+                <div className="absolute right-2 flex items-center gap-1">
+                  {voiceSupported && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setVoiceLang((prev) => (prev === "en-IN" ? "kn-IN" : "en-IN"))}
+                        disabled={loading || isListening}
+                        className="px-1.5 py-1 rounded-md text-[10px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 cursor-pointer disabled:opacity-50"
+                        title="Toggle Voice Language: English (en-IN) / Kannada (kn-IN)"
+                      >
+                        {voiceLang === "kn-IN" ? "KN" : "EN"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleToggleVoice}
+                        disabled={loading}
+                        className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm transition cursor-pointer ${
+                          isListening
+                            ? "bg-rose-600 text-white animate-pulse shadow-xs"
+                            : "bg-slate-100 hover:bg-sky-50 text-slate-600 hover:text-sky-700 border border-slate-200"
+                        }`}
+                        title={isListening ? "Stop Voice Input" : `Speak Question (${voiceLang === "kn-IN" ? "Kannada" : "English"})`}
+                        aria-label={isListening ? "Stop voice recognition" : "Start voice recognition"}
+                      >
+                        {isListening ? "🔴" : "🎙️"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
 
               {loading ? (
                 <button

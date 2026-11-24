@@ -63,6 +63,12 @@ export default function AdminPage() {
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [docsError, setDocsError] = useState("");
 
+  // Question Analytics states
+  const [analyticsData, setAnalyticsData] = useState(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState("");
+  const [showRepeatedOnly, setShowRepeatedOnly] = useState(false);
+
   // Deletion modal & preview state
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [targetForDelete, setTargetForDelete] = useState(null);
@@ -93,6 +99,7 @@ export default function AdminPage() {
       if (res.ok && data.authenticated) {
         setIsAuthenticated(true);
         fetchDocuments();
+        fetchAnalytics();
       } else {
         setIsAuthenticated(false);
       }
@@ -121,6 +128,7 @@ export default function AdminPage() {
         setIsAuthenticated(true);
         setPasswordInput("");
         fetchDocuments();
+        fetchAnalytics();
       } else {
         setAuthError(data.error || "Authentication failed: Invalid administrator passcode.");
       }
@@ -162,6 +170,38 @@ export default function AdminPage() {
       setDocsError(err.message || "Failed to load indexed documents");
     } finally {
       setLoadingDocs(false);
+    }
+  }
+
+  async function fetchAnalytics() {
+    setLoadingAnalytics(true);
+    setAnalyticsError("");
+    try {
+      const res = await fetch("/api/admin/analytics", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAnalyticsData(data);
+      } else if (res.status !== 401 && res.status !== 403) {
+        setAnalyticsError(data.error || "Failed to fetch question analytics");
+      }
+    } catch (err) {
+      setAnalyticsError(err.message || "Failed to load question analytics");
+    } finally {
+      setLoadingAnalytics(false);
+    }
+  }
+
+  async function handleClearAnalytics() {
+    try {
+      const res = await fetch("/api/admin/analytics", { method: "DELETE" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        fetchAnalytics();
+      } else {
+        setAnalyticsError(data.error || "Failed to reset question analytics");
+      }
+    } catch (err) {
+      setAnalyticsError(err.message || "Failed to reset question analytics");
     }
   }
 
@@ -1117,6 +1157,198 @@ export default function AdminPage() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+        </section>
+
+        {/* Student Question Analytics & Most Repeatedly Asked Questions */}
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 mt-8">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <span>📊</span> Most Repeatedly Asked Questions &amp; Student Inquiry Areas
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Track which questions students repeat most often and which academic areas (Fees, Syllabus, Timetables, Labs) generate the highest demand.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <button
+                type="button"
+                onClick={fetchAnalytics}
+                disabled={loadingAnalytics}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl transition cursor-pointer"
+              >
+                <span>{loadingAnalytics ? "⏳" : "🔄"}</span>
+                <span>{loadingAnalytics ? "Loading..." : "Refresh Insights"}</span>
+              </button>
+              {analyticsData && analyticsData.total_queries > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearAnalytics}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl transition cursor-pointer"
+                >
+                  <span>🗑️</span>
+                  <span>Reset</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {analyticsError && (
+            <div className="mb-4 p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+              ❌ {analyticsError}
+            </div>
+          )}
+
+          {/* Quick Summary Strip */}
+          {analyticsData && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+              <div className="p-4 rounded-xl bg-sky-50/70 border border-sky-200">
+                <p className="text-[11px] font-bold text-sky-800 uppercase tracking-wider">Total Student Queries</p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{analyticsData.total_queries || 0}</p>
+              </div>
+              <div className="p-4 rounded-xl bg-purple-50/70 border border-purple-200">
+                <p className="text-[11px] font-bold text-purple-800 uppercase tracking-wider">Unique Questions</p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{analyticsData.unique_questions || 0}</p>
+              </div>
+              <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200">
+                <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Repeated Questions (2+ Asks)</p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{analyticsData.repeated_questions_count || 0}</p>
+              </div>
+            </div>
+          )}
+
+          {!analyticsData || (analyticsData.top_questions || []).length === 0 ? (
+            <div className="p-8 text-center bg-slate-50 border border-dashed border-slate-200 rounded-2xl text-xs text-slate-500">
+              No student questions logged yet. As soon as students ask questions on the Assistant page, the most frequently asked topics and repeated questions will appear here.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Left Column: Topic / Area Breakdown */}
+              <div className="bg-slate-50/80 border border-slate-200 rounded-2xl p-4 space-y-3">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>🎯</span> Top Inquiry Areas
+                </h3>
+                <div className="space-y-3">
+                  {(analyticsData.area_breakdown || []).map((areaItem) => {
+                    const meta = CATEGORY_META[areaItem.area] || (
+                      areaItem.area === "timetable"
+                        ? { name: "Timetable & Faculty", icon: "📅" }
+                        : CATEGORY_META.general
+                    );
+                    return (
+                      <div key={areaItem.area} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-700 flex items-center gap-1.5">
+                            <span>{meta.icon}</span>
+                            <span>{meta.name}</span>
+                          </span>
+                          <span className="font-bold text-slate-900">
+                            {areaItem.count} ({areaItem.percentage}%)
+                          </span>
+                        </div>
+                        <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-sky-600 rounded-full transition-all"
+                            style={{ width: `${Math.min(100, areaItem.percentage)}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Right Column: Ranked Repeated Questions Table */}
+              <div className="lg:col-span-2 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>🔥</span> Most Repeatedly Asked Questions
+                  </h3>
+                  <label className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={showRepeatedOnly}
+                      onChange={(e) => setShowRepeatedOnly(e.target.checked)}
+                      className="rounded text-sky-600 cursor-pointer"
+                    />
+                    <span>Show repeated only (2+)</span>
+                  </label>
+                </div>
+
+                <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                  {(analyticsData.top_questions || [])
+                    .filter((q) => !showRepeatedOnly || q.count >= 2)
+                    .map((qItem, idx) => {
+                      const areaMeta = CATEGORY_META[qItem.primary_area] || (
+                        qItem.primary_area === "timetable"
+                          ? { name: "Timetable & Faculty", icon: "📅", bg: "bg-cyan-50 text-cyan-800 border-cyan-200" }
+                          : CATEGORY_META.general
+                      );
+                      return (
+                        <div
+                          key={qItem.id || idx}
+                          className="p-3.5 rounded-xl border border-slate-200 bg-white hover:border-sky-300 transition flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        >
+                          <div className="flex items-start gap-3 min-w-0">
+                            <span
+                              className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
+                                idx === 0
+                                  ? "bg-amber-100 text-amber-800 border border-amber-300"
+                                  : idx === 1
+                                  ? "bg-slate-200 text-slate-800"
+                                  : "bg-slate-100 text-slate-600"
+                              }`}
+                            >
+                              #{idx + 1}
+                            </span>
+                            <div className="min-w-0 space-y-1">
+                              <p className="text-sm font-semibold text-slate-900 break-words">
+                                {qItem.question}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                <span className={`px-2 py-0.5 rounded border font-semibold ${areaMeta.bg || "bg-slate-50 text-slate-700 border-slate-200"}`}>
+                                  {areaMeta.icon} {areaMeta.name}
+                                </span>
+                                {qItem.primary_institution && qItem.primary_institution !== "all" && (
+                                  <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200 font-semibold uppercase">
+                                    🏛️ {qItem.primary_institution}
+                                  </span>
+                                )}
+                                {qItem.primary_department && qItem.primary_department !== "ALL" && (
+                                  <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
+                                    {qItem.primary_department}
+                                  </span>
+                                )}
+                                {qItem.last_asked_at && (
+                                  <span className="text-slate-400">
+                                    Last asked: {new Date(qItem.last_asked_at).toLocaleString()}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="shrink-0 flex items-center gap-2 self-end sm:self-center">
+                            <span
+                              className={`px-3 py-1 rounded-full text-xs font-bold border ${
+                                qItem.count >= 3
+                                  ? "bg-rose-50 text-rose-700 border-rose-200"
+                                  : qItem.count >= 2
+                                  ? "bg-amber-50 text-amber-800 border-amber-200"
+                                  : "bg-slate-100 text-slate-700 border-slate-200"
+                              }`}
+                            >
+                              {qItem.count >= 2 ? `🔥 Asked ${qItem.count}×` : "Asked 1×"}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
             </div>
           )}
         </section>
